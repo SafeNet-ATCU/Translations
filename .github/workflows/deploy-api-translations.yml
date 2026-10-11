@@ -32,25 +32,27 @@ jobs:
           echo "user=${DEPLOY_USER:-alhambra}" >> "$GITHUB_OUTPUT"
 
       - name: Prepare SSH
-        env:
-          SSH_KEY: ${{ secrets.ATCU_DEPLOY_SSH_KEY }}
         run: |
           set -euo pipefail
           mkdir -p ~/.ssh
-          if [ -z "${SSH_KEY}" ]; then
-            echo "ERROR: secret ATCU_DEPLOY_SSH_KEY is empty/missing in this repo."
-            echo "Copy the same deploy private key used by SafeNet-ATCU/API into"
-            echo "Settings → Secrets and variables → Actions → ATCU_DEPLOY_SSH_KEY"
+          # Same key handling as SafeNet-ATCU/API (proven working).
+          printf '%s\n' "${{ secrets.ATCU_DEPLOY_SSH_KEY }}" > ~/.ssh/id_deploy
+          chmod 600 ~/.ssh/id_deploy
+
+          if ! grep -q "BEGIN .*PRIVATE KEY" ~/.ssh/id_deploy; then
+            echo "ERROR: ATCU_DEPLOY_SSH_KEY does not look like a private key."
+            echo "Paste the full private key including BEGIN/END lines (same value as in the API repo)."
             exit 1
           fi
-          # Support keys pasted with literal \n sequences from the GitHub UI.
-          printf '%s\n' "${SSH_KEY}" | sed 's/\r$//' | sed 's/\\n/\n/g' > ~/.ssh/id_deploy
-          chmod 600 ~/.ssh/id_deploy
-          ssh-keygen -y -f ~/.ssh/id_deploy >/dev/null
+
+          echo "Deploy key fingerprint:"
+          ssh-keygen -lf <(ssh-keygen -y -f ~/.ssh/id_deploy)
+
           ssh-keyscan -H "${{ steps.target.outputs.host }}" >> ~/.ssh/known_hosts
           ssh -i ~/.ssh/id_deploy \
             -o BatchMode=yes \
             -o IdentitiesOnly=yes \
+            -o PreferredAuthentications=publickey \
             -o StrictHostKeyChecking=yes \
             "${{ steps.target.outputs.user }}@${{ steps.target.outputs.host }}" \
             'echo SSH_OK'
