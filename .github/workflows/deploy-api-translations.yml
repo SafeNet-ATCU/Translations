@@ -1,0 +1,116 @@
+name: Deploy API Translations
+
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - 'API/**/*.json'
+      - 'API/*.json'
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-api-translations
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      DEPLOY_HOST: ${{ secrets.ATCU_DEPLOY_HOST }}
+      DEPLOY_USER: ${{ secrets.ATCU_DEPLOY_USER }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve deploy target
+        id: target
+        run: |
+          echo "host=${DEPLOY_HOST:-136.144.147.243}" >> "$GITHUB_OUTPUT"
+          echo "user=${DEPLOY_USER:-alhambra}" >> "$GITHUB_OUTPUT"
+
+      - name: Prepare SSH
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "${{ secrets.ATCU_DEPLOY_SSH_KEY }}" > ~/.ssh/id_deploy
+          chmod 600 ~/.ssh/id_deploy
+          ssh-keyscan -H "${{ steps.target.outputs.host }}" >> ~/.ssh/known_hosts
+
+      - name: Sync changed API translation JSON files
+        env:
+          BEFORE: ${{ github.event.before }}
+          SHA: ${{ github.sha }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          HOST="${{ steps.target.outputs.host }}"
+          USER="${{ steps.target.outputs.user }}"
+          REMOTE_DIR="/home/alhambra/API/translations"
+          SSH=(ssh -i ~/.ssh/id_deploy -o StrictHostKeyChecking=yes)
+          RSYNC_SSH="ssh -i ~/.ssh/id_deploy -o StrictHostKeyChecking=yes"
+
+          "${SSH[@]}" "${USER}@${HOST}" "mkdir -p '${REMOTE_DIR}'"
+
+          sync_all=0
+          if [ "${EVENT_NAME}" = "workflow_dispatch" ]; then
+            sync_all=1
+          elif [ -z "${BEFORE}" ] || [ "${BEFORE}" = "0000000000000000000000000000000000000000" ]; then
+            sync_all=1
+          elif ! git cat-file -e "${BEFORE}^{commit}" 2>/dev/null; then
+            sync_all=1
+          fi
+
+          if [ "${sync_all}" -eq 1 ]; then
+            echo "Full sync of API/*.json -> ${REMOTE_DIR}"
+            rsync -az --delete \
+              --include='*/' \
+              --include='*.json' \
+              --exclude='*' \
+              -e "${RSYNC_SSH}" \
+              "./API/" "${USER}@${HOST}:${REMOTE_DIR}/"
+          else
+            mapfile -t changed < <(
+              git diff --name-only --diff-filter=ACMR "${BEFORE}" "${SHA}" -- 'API/*.json' 'API/**/*.json'
+            )
+            mapfile -t deleted < <(
+              git diff --name-only --diff-filter=D "${BEFORE}" "${SHA}" -- 'API/*.json' 'API/**/*.json'
+            )
+
+            if [ "${#changed[@]}" -eq 0 ] && [ "${#deleted[@]}" -eq 0 ]; then
+              echo "No API translation JSON changes to sync."
+              exit 0
+            fi
+
+            for rel in "${changed[@]}"; do
+              [ -n "${rel}" ] || continue
+              base="$(basename "${rel}")"
+              echo "Upload ${rel} -> ${REMOTE_DIR}/${base}"
+              rsync -az -e "${RSYNC_SSH}" "./${rel}" "${USER}@${HOST}:${REMOTE_DIR}/${base}"
+            done
+
+            for rel in "${deleted[@]}"; do
+              [ -n "${rel}" ] || continue
+              base="$(basename "${rel}")"
+              echo "Delete ${REMOTE_DIR}/${base}"
+              "${SSH[@]}" "${USER}@${HOST}" "rm -f '${REMOTE_DIR}/${base}'"
+            done
+          fi
+
+          "${SSH[@]}" "${USER}@${HOST}" "ls -la '${REMOTE_DIR}'"
+
+      - name: Restart API to reload translation cache
+        run: |
+          set -euo pipefail
+          HOST="${{ steps.target.outputs.host }}"
+          USER="${{ steps.target.outputs.user }}"
+          ssh -i ~/.ssh/id_deploy -o StrictHostKeyChecking=yes "${USER}@${HOST}" bash -s <<'EOF'
+          set -euo pipefail
+          APP_DIR="/home/alhambra/API"
+          if [ -x "${APP_DIR}/deploy/start-api.sh" ]; then
+            bash "${APP_DIR}/deploy/start-api.sh"
+          else
+            echo "WARNING: ${APP_DIR}/deploy/start-api.sh missing — translations synced, restart API manually."
+          fi
+          EOF
