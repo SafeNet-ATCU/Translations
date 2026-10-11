@@ -28,16 +28,37 @@ jobs:
       - name: Resolve deploy target
         id: target
         run: |
-          echo "host=${DEPLOY_HOST:-138.144.147.243}" >> "$GITHUB_OUTPUT"
+          echo "host=${DEPLOY_HOST:-136.144.147.243}" >> "$GITHUB_OUTPUT"
           echo "user=${DEPLOY_USER:-alhambra}" >> "$GITHUB_OUTPUT"
 
       - name: Prepare SSH
+        env:
+          SSH_KEY: ${{ secrets.ATCU_DEPLOY_SSH_KEY }}
         run: |
+          set -euo pipefail
           mkdir -p ~/.ssh
-          # Must match SafeNet-ATCU/API deploy-atcu-api.yml exactly.
-          printf '%s\n' "${{ secrets.ATCU_DEPLOY_SSH_KEY }}" > ~/.ssh/id_deploy
+          if [ -z "${SSH_KEY}" ]; then
+            echo "ERROR: ATCU_DEPLOY_SSH_KEY is empty or missing in this repo."
+            exit 1
+          fi
+          printf '%s\n' "${SSH_KEY}" > ~/.ssh/id_deploy
           chmod 600 ~/.ssh/id_deploy
-          ssh-keyscan -H "${{ steps.target.outputs.host }}" >> ~/.ssh/known_hosts
+          HOST="${{ steps.target.outputs.host }}"
+          if [ -z "${HOST}" ]; then
+            echo "ERROR: deploy host is empty."
+            exit 1
+          fi
+          echo "Running ssh-keyscan (host redacted if it is a secret)..."
+          if ! ssh-keyscan -T 10 -H "${HOST}" >> ~/.ssh/known_hosts 2>keyscan.err; then
+            echo "ERROR: ssh-keyscan failed — server unreachable or ATCU_DEPLOY_HOST wrong."
+            sed -E 's/[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/<host>/g' keyscan.err >&2 || true
+            exit 1
+          fi
+          if [ ! -s ~/.ssh/known_hosts ]; then
+            echo "ERROR: known_hosts is empty after ssh-keyscan."
+            exit 1
+          fi
+          echo "SSH prep OK (known_hosts lines: $(wc -l < ~/.ssh/known_hosts))"
 
       - name: Sync changed API translation JSON files
         env:
