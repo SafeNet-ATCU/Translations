@@ -32,11 +32,28 @@ jobs:
           echo "user=${DEPLOY_USER:-alhambra}" >> "$GITHUB_OUTPUT"
 
       - name: Prepare SSH
+        env:
+          SSH_KEY: ${{ secrets.ATCU_DEPLOY_SSH_KEY }}
         run: |
+          set -euo pipefail
           mkdir -p ~/.ssh
-          printf '%s\n' "${{ secrets.ATCU_DEPLOY_SSH_KEY }}" > ~/.ssh/id_deploy
+          if [ -z "${SSH_KEY}" ]; then
+            echo "ERROR: secret ATCU_DEPLOY_SSH_KEY is empty/missing in this repo."
+            echo "Copy the same deploy private key used by SafeNet-ATCU/API into"
+            echo "Settings → Secrets and variables → Actions → ATCU_DEPLOY_SSH_KEY"
+            exit 1
+          fi
+          # Support keys pasted with literal \n sequences from the GitHub UI.
+          printf '%s\n' "${SSH_KEY}" | sed 's/\r$//' | sed 's/\\n/\n/g' > ~/.ssh/id_deploy
           chmod 600 ~/.ssh/id_deploy
+          ssh-keygen -y -f ~/.ssh/id_deploy >/dev/null
           ssh-keyscan -H "${{ steps.target.outputs.host }}" >> ~/.ssh/known_hosts
+          ssh -i ~/.ssh/id_deploy \
+            -o BatchMode=yes \
+            -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=yes \
+            "${{ steps.target.outputs.user }}@${{ steps.target.outputs.host }}" \
+            'echo SSH_OK'
 
       - name: Sync changed API translation JSON files
         env:
@@ -48,8 +65,8 @@ jobs:
           HOST="${{ steps.target.outputs.host }}"
           USER="${{ steps.target.outputs.user }}"
           REMOTE_DIR="/home/alhambra/API/translations"
-          SSH=(ssh -i ~/.ssh/id_deploy -o StrictHostKeyChecking=yes)
-          RSYNC_SSH="ssh -i ~/.ssh/id_deploy -o StrictHostKeyChecking=yes"
+          SSH=(ssh -i ~/.ssh/id_deploy -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes)
+          RSYNC_SSH="ssh -i ~/.ssh/id_deploy -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes"
 
           "${SSH[@]}" "${USER}@${HOST}" "mkdir -p '${REMOTE_DIR}'"
 
@@ -105,7 +122,7 @@ jobs:
           set -euo pipefail
           HOST="${{ steps.target.outputs.host }}"
           USER="${{ steps.target.outputs.user }}"
-          ssh -i ~/.ssh/id_deploy -o StrictHostKeyChecking=yes "${USER}@${HOST}" bash -s <<'EOF'
+          ssh -i ~/.ssh/id_deploy -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes "${USER}@${HOST}" bash -s <<'EOF'
           set -euo pipefail
           APP_DIR="/home/alhambra/API"
           if [ -x "${APP_DIR}/deploy/start-api.sh" ]; then
